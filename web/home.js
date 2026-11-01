@@ -113,6 +113,30 @@
   var lifted = {};   // icon url -> {src, bg: [r, g, b], ink: luminance histogram} or false (keep the icon as it is)
   var LIFT_SIZE = 240;
 
+  // Lifting reads every pixel of every icon, which on a TV's CPU held the first frames for a few hundred ms: what was
+  // lifted is kept for the next start, only for the apps the TV still has, and never past LIFT_MAX characters.
+  var LIFT_KEY = 'fmtv.logos.1', LIFT_MAX = 1500000, liftTimer = 0;
+  try { lifted = JSON.parse(localStorage.getItem(LIFT_KEY)) || {}; } catch (e) { lifted = {}; }
+
+  function keepLifted(url, logo) {
+    lifted[url] = logo;
+    clearTimeout(liftTimer);
+    liftTimer = setTimeout(function () {
+      var keep = {}, size = 0;
+      for (var i = 0; i < apps.length; i++) {
+        var u = apps[i].icon;
+        if (!u || lifted[u] === undefined || keep[u] !== undefined) continue;
+        var n = lifted[u] ? lifted[u].src.length + 120 : 8;
+        if (size + n > LIFT_MAX) continue;
+        keep[u] = lifted[u];
+        size += n;
+      }
+      try { localStorage.setItem(LIFT_KEY, JSON.stringify(keep)); } catch (e) {
+        try { localStorage.removeItem(LIFT_KEY); } catch (e2) {}
+      }
+    }, 3000);
+  }
+
   // sRGB (0-255) to linear light, computed once: lift() needs it for every pixel, and old TVs are slow at Math.pow.
   var LINEAR = [];
   for (var li = 0; li < 256; li++) LINEAR[li] = li <= 10 ? li / 255 / 12.92 : Math.pow((li / 255 + 0.055) / 1.055, 2.4);
@@ -334,7 +358,7 @@
       if (lifted[url] !== false) {
         img.onload = function () {
           img.onload = null;
-          if (lifted[url] === undefined) lifted[url] = lift(img);
+          if (lifted[url] === undefined) keepLifted(url, lift(img));
           if (lifted[url]) showLogo(img, box, top, bottom, lifted[url], !k);
         };
       }
@@ -915,6 +939,14 @@
       step: function (d) { cycle('boxInput', ['live', 'hdmi1', 'hdmi2', 'hdmi3', 'hdmi4'], Prefs.boxInput(), d); renderTop(); }});
     rows.push({label: tr('Live TV'), toggle: Prefs.liveInput(),
       step: function () { Prefs.set('liveInput', !Prefs.liveInput()); renderDrawer(); }});
+    var look = Prefs.look();
+    rows.push({label: tr('Performance'), value: look === 'full' ? tr('perf|Full') : look === 'flat' ? tr('perf|Fast') : look === 'lite' ? tr('perf|Lightest') : auto,
+      step: function (d) { cycle('look', ['auto', 'full', 'flat', 'lite'], look, d); applyLook(); }});
+    if (raf) rows.push({label: tr('FPS counter'), toggle: Prefs.fps(), step: function () { Prefs.set('fps', !Prefs.fps()); applyFps(); }});
+    if (TV.canWatchHdmi) {
+      rows.push({label: tr('Switch to HDMI devices that turn on'), toggle: Prefs.autoHdmi(),
+        step: function () { Prefs.set('autoHdmi', !Prefs.autoHdmi()); }});
+    }
     rows.push({label: tr('Shelf'), value: '›', shelf: true, step: function (d) { if (d >= 0) openShelfEdit(); }});
     rows.push({label: tr('About this TV'), value: '›', about: true, step: function (d) { if (d >= 0) openAbout(); }});
     if (TV.canOpenSettings) rows.push({label: tr('TV Settings'), value: '›', step: function (d) { if (d >= 0) tvSettings(); }});
@@ -1716,6 +1748,68 @@
     return true;
   }
 
+  // MARK: - Performance and the frame rate counter
+
+  function applyLook() {
+    var l = Prefs.look(), want = l === 'auto' ? TV.look : l === 'full' ? '' : l, root = document.documentElement;
+    setClass(root, 'lite', want === 'lite');
+    setClass(root, 'flat', want === 'flat');
+  }
+
+  var raf = window.requestAnimationFrame || window.webkitRequestAnimationFrame;
+  var fpsBox = null, fpsOn = false, fpsLast = 0, fpsFrom = 0, fpsFrames = 0, fpsWorst = 0, fpsDrops = 0;
+  var FRAME = 1000 / 60;
+
+  /**
+   * Frames drawn in the last second, the longest one in it and the frames missed since the counter came on (a frame
+   * that took 50 ms missed 2). requestAnimationFrame runs at the screen's rate when nothing moves, so an idle screen
+   * reads 60; what counts is what it reads while the focus moves.
+   */
+  function fpsFrame(now) {
+    if (!fpsOn) return;
+    if (fpsLast) {
+      var dt = now - fpsLast;
+      if (dt > 1000) { fpsFrom = now; fpsFrames = 0; fpsWorst = 0; }   // the app was away: start over
+      else {
+        fpsFrames++;
+        if (dt > fpsWorst) fpsWorst = dt;
+        if (dt > FRAME * 1.5) fpsDrops += Math.round(dt / FRAME) - 1;
+      }
+    } else fpsFrom = now;
+    fpsLast = now;
+    if (now - fpsFrom >= 1000) {
+      var fps = Math.round(fpsFrames * 1000 / (now - fpsFrom));
+      fpsBox.className = 'on ' + (fps >= 55 ? 'ok' : fps >= 40 ? 'meh' : 'bad');
+      fpsBox.firstChild.textContent = fps + ' fps';
+      fpsBox.lastChild.textContent = trf('fps|worst {ms} ms', {ms: Math.round(fpsWorst)}) + '  ·  ' +
+          trf('fps|{n} dropped', {n: fpsDrops});
+      fpsFrom = now;
+      fpsFrames = 0;
+      fpsWorst = 0;
+    }
+    raf.call(window, fpsFrame);
+  }
+
+  function applyFps() {
+    var on = !!raf && Prefs.fps();
+    if (on === fpsOn) return;
+    fpsOn = on;
+    if (!fpsBox) {
+      fpsBox = el('div', '', stage);
+      fpsBox.id = 'fps';
+      el('span', 'n', fpsBox, '');
+      el('span', 'd', fpsBox, '');
+    }
+    fpsBox.className = on ? 'on' : '';
+    fpsLast = 0;
+    fpsDrops = 0;
+    if (on) {
+      fpsBox.firstChild.textContent = '… fps';
+      fpsBox.lastChild.textContent = '';
+      raf.call(window, fpsFrame);
+    }
+  }
+
   // MARK: - Keys
 
   document.addEventListener('keydown', function (e) {
@@ -1769,14 +1863,45 @@
     return false;
   }
 
+  // The TV's list of apps and inputs from the last time, so the shelf shows at once at the next start, before the TV
+  // answers (with hundreds of apps on newer Samsungs, that takes a while); then only a list that changed draws again.
+  var APPS_KEY = 'fmtv.apps.1', appsSeen = '';
+
+  function signature(list, list2) {
+    var parts = [];
+    for (var i = 0; i < list.length; i++) parts.push(list[i].id + '|' + list[i].title + '|' + list[i].icon + '|' + list[i].color);
+    for (var j = 0; j < list2.length; j++) parts.push(list2[j].id + '|' + list2[j].label + '|' + list2[j].connected);
+    return parts.join('\n');
+  }
+
+  function useApps(list, list2) {
+    apps = list.filter(function (a) { return !hidden(a); });
+    Data.setApps(apps);
+    pickShelf();
+    inputs = list2;
+  }
+
+  /** The apps from the last start; true when there were some. */
+  function cachedApps() {
+    var c = null;
+    try { c = JSON.parse(localStorage.getItem(APPS_KEY)); } catch (e) {}
+    if (!c || !c.apps || !c.apps.length || !c.inputs) return false;
+    useApps(c.apps, c.inputs);
+    appsSeen = signature(c.apps, c.inputs);
+    return true;
+  }
+
+  /** done(changed): changed is false when the TV lists what's already shown. */
   function loadApps(done) {
     TV.apps(function (list) {
-      apps = list.filter(function (a) { return !hidden(a); });
-      Data.setApps(apps);
-      pickShelf();
       TV.inputs(function (list2) {
-        inputs = list2;
-        if (done) done();
+        var sig = signature(list, list2), changed = sig !== appsSeen;
+        appsSeen = sig;
+        if (changed) {
+          useApps(list, list2);
+          try { localStorage.setItem(APPS_KEY, JSON.stringify({apps: list, inputs: list2})); } catch (e) {}
+        }
+        if (done) done(changed);
       });
     });
   }
@@ -1813,7 +1938,11 @@
     // LG: with handlesRelaunch the app has to come to the front itself, or opening it again while it runs shows nothing.
     if (window.PalmSystem && window.PalmSystem.activate) window.PalmSystem.activate();
     reset();
-    loadApps(function () { renderShelf(); renderDrawer(); restInDrawer(); Data.refresh(); });
+    loadApps(function (changed) {
+      if (changed) { renderShelf(); renderDrawer(); }
+      restInDrawer();
+      Data.refresh();
+    });
   }
 
   window.addEventListener('resize', fit);
@@ -1826,7 +1955,11 @@
     hideAmbient();
     if (document.hidden) return;
     idleAt = Date.now();
-    loadApps(function () { renderShelf(); renderDrawer(); updateFocus(); Data.refresh(); });
+    loadApps(function (changed) {
+      if (changed) { renderShelf(); renderDrawer(); }
+      updateFocus();
+      Data.refresh();
+    });
   });
 
   I18N.set(Prefs.language());
@@ -1835,13 +1968,26 @@
   // LG's screensaver waits only when ours will show: not under a sheet (ours waits there), and not without photos.
   TV.holdScreenSaver(function () { return !sheetOpen() && (saverMode() === 'clock' || saverPhotos().length > 0); });
   fit();
+  applyLook();
+  applyFps();
   renderTop();
   applyDim();
   tickClock();
-  loadApps(function () {
-    renderAll();
+  var fromCache = cachedApps();
+  if (fromCache) { renderAll(); restInDrawer(); }
+  loadApps(function (changed) {
+    if (changed || !fromCache) renderAll();
     restInDrawer();
     Data.refresh();
+  });
+  TV.watchHdmi(function () { return Prefs.autoHdmi(); }, function (id, number) {
+    var x = null;
+    for (var i = 0; i < inputs.length; i++) if (inputs[i].id === id) x = inputs[i];
+    var name = x && x.label ? x.label : 'HDMI ' + number;
+    hideSaver();
+    hideAmbient();
+    toast(trf('Switching to {input}…', {input: name}));
+    launcher(id, name)();
   });
   setInterval(function () {
     checkNight();
