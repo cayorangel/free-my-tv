@@ -102,6 +102,12 @@ var Prefs = (function () {
       if (off) list.push(key);
       this.set('servicesOff', list);
     },
+    /** Home Settings > Performance: 'auto' (what tv.js picks for this TV), 'full', 'flat' (no moving shadows) or 'lite'. */
+    look: function () { var l = pick('look', 'auto'); return l === 'full' || l === 'flat' || l === 'lite' ? l : 'auto'; },
+    /** A small frame rate counter in the corner (off by default). */
+    fps: function () { return pick('fps', false) === true; },
+    /** Samsung: go to an HDMI port as soon as a device there comes on, while the home screen shows (off by default). */
+    autoHdmi: function () { return pick('autoHdmi', false) === true; },
     openPicks: function () { return pick('openPicks', CONFIG.openPicksIn === 'nuvio' ? 'nuvio' : 'apps'); },
     set: function (name, value) { v[name] = value; save(); this.version++; },
     setCoin: function (i, on) {

@@ -21,15 +21,17 @@ var TV = (function () {
   // size: none at a ratio of 1 has been measured. deviceMemory (webOS 5+, Tizen 5+) is the nearest power of two, so it
   // reads 1 up to about 1.5 GB.
   var lowMemory = navigator.deviceMemory && navigator.deviceMemory <= 1;
+  var look = '';   // what this TV gets on its own; Home Settings > Performance can pick another (home.js)
   if (tizen2 || (webos && lowMemory) || (samsung && lowMemory && (window.devicePixelRatio || 1) > 1)) {
-    document.documentElement.className += ' lite';
+    look = 'lite';
   } else if (samsung && navigator.deviceMemory && navigator.deviceMemory <= 2) {
     // Samsungs up to 2 GB keep the animations but not the soft shadows of the parts that move (home.css): a 2021 Frame
     // (QE55LS03A, Tizen 6, 2 GB, ratio 1) froze for up to 360 ms on each move along the picks and dropped 78 frames in
     // 8 moves along the shelf; with flat, at most 75 ms and 13 frames. Not with lite, which has no shadows or
     // animations to spare, and where the layers flat asks for would only take memory.
-    document.documentElement.className += ' flat';
+    look = 'flat';
   }
+  if (look) document.documentElement.className += ' ' + look;
 
   /** One Luna call; done(result) with null on failure. */
   function luna(uri, params, done) {
@@ -409,6 +411,38 @@ var TV = (function () {
     });
   }
 
+  /**
+   * Samsung: done(id, number) when a device comes on at an HDMI port ("source:HDMI:2"), as a console waking up does.
+   * Only while this app is on screen (`active` says whether to look): a hidden one could take the TV away from what's
+   * playing. What's on when it starts, or when the app comes back, is where it starts from. The TV tells through
+   * VIDEOSOURCE's listener; a look every 3 s covers firmware whose listener stays quiet.
+   */
+  function samsungWatchHdmi(active, done) {
+    var known = null;
+    function check(list) {
+      if (!list) return;
+      var now = {}, fresh = [];
+      for (var i = 0; i < list.length; i++) if (list[i].type === 'HDMI') now[list[i].number] = true;
+      if (known && !document.hidden && active()) {
+        for (var n in now) if (Object.prototype.hasOwnProperty.call(now, n) && !known[n]) fresh.push(+n);
+      }
+      known = now;
+      if (fresh.length) done('source:HDMI:' + fresh[0], fresh[0]);
+    }
+    function look() {
+      if (document.hidden || !active()) { known = null; return; }
+      samsungSources(check);
+    }
+    try {
+      window.tizen.systeminfo.addPropertyValueChangeListener('VIDEOSOURCE', function (v) {
+        if (known) check(v && v.connected);
+      });
+    } catch (e) {}
+    document.addEventListener('visibilitychange', function () { known = null; look(); });
+    look();
+    setInterval(look, 3000);
+  }
+
   /** Samsung's settings: whichever app answers the platform's "settings" request, else the TV's menu (Tizen 3). */
   function samsungSettings(done) {
     function menu() { samsungLaunch(SAMSUNG_MENU, done); }
@@ -594,6 +628,17 @@ var TV = (function () {
         }
         done(list);
       });
+    },
+
+    /** The look this TV gets on its own: 'lite' (no shadows or animations), 'flat' (no moving shadows) or ''. */
+    look: look,
+
+    /** Whether watchHdmi can tell when a device comes on (Samsung). */
+    canWatchHdmi: samsung,
+
+    /** done(id, number) when a device comes on at an HDMI port, while `active()` and the app is on screen. */
+    watchHdmi: function (active, done) {
+      if (this.canWatchHdmi) samsungWatchHdmi(active, done);
     },
 
     /** The TV's own settings; done(ok). */
