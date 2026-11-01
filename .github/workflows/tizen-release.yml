@@ -1,0 +1,42 @@
+# This fork: every push to main that changes the Samsung app builds FreeMyTV-tizen.wgt (generic: no key, the city
+# from the TV's time zone) and publishes it as the latest release, which TizenBrew Installer installs
+# (cayorangel/free-my-tv). Not signed: on 2023+ TVs the installer signs it with the person's Samsung account.
+name: Samsung release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'tizen/**'
+      - 'tools/webapp.py'
+      - 'app/assets/i18n/**'
+      - '.github/workflows/tizen-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tizen-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build
+        run: python3 tizen/build.py --generic
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(sed -n 's/.*<widget[^>]* version="\([^"]*\)".*/\1/p' tizen/config.xml)"
+          tag="v${version}-build.${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" FreeMyTV-tizen.wgt --target "$GITHUB_SHA" --latest \
+            --title "Free My TV ${version} (build ${GITHUB_RUN_NUMBER})" \
+            --notes "Samsung build of ${GITHUB_SHA::7}. Install with TizenBrew Installer: ${GITHUB_REPOSITORY}"
